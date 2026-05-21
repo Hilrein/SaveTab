@@ -733,6 +733,50 @@ function RelationGraph({
   );
 }
 
+// Helper: Convert HSL values to HEX Color String
+function hslToHex(h: number, s: number, l: number): string {
+  l /= 100;
+  const a = (s * Math.min(l, 1 - l)) / 100;
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+// Helper: Convert HEX Color String to HSL values
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+  let c = hex.replace(/^#/, '');
+  if (c.length === 3) {
+    c = c.split('').map(x => x + x).join('');
+  }
+  if (c.length !== 6) return { h: 324, s: 100, l: 74 }; // Fallback to presets style
+  const r = parseInt(c.slice(0, 2), 16) / 255;
+  const g = parseInt(c.slice(2, 4), 16) / 255;
+  const b = parseInt(c.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return {
+    h: Math.round(h * 360),
+    s: Math.round(s * 100),
+    l: Math.round(l * 100)
+  };
+}
+
 export default function Home() {
   const [isMounted, setIsMounted] = useState(false);
   const [folders, setFolders] = useState<TabFolder[]>([]);
@@ -783,6 +827,28 @@ export default function Home() {
   // Drag states
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [dragHoverFolderId, setDragHoverFolderId] = useState<string | null>(null);
+  const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
+  const [dragOverFolderIdForReorder, setDragOverFolderIdForReorder] = useState<string | null>(null);
+  const [dragHoverTabId, setDragHoverTabId] = useState<string | null>(null);
+
+  // Deletion custom dialog state
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+    type: 'folder' | 'tab';
+    id: string;
+    name: string;
+  } | null>(null);
+
+  // Shortcuts Guide Modal state
+  const [isHotkeysModalOpen, setIsHotkeysModalOpen] = useState(false);
+  const [isMac, setIsMac] = useState(false);
+
+  // Custom Color Picker states
+  const [showCustomColor, setShowCustomColor] = useState(false);
+  const [pickerHue, setPickerHue] = useState(324); // Default corresponding to #ff79c6
+  const [pickerSat, setPickerSat] = useState(100);
+  const [pickerLight, setPickerLight] = useState(74);
+  const [hexInputText, setHexInputText] = useState('');
+  const [isHexInvalid, setIsHexInvalid] = useState(false);
 
   // Edit Link Modal states
   const [editingTab, setEditingTab] = useState<Tab | null>(null);
@@ -809,6 +875,9 @@ export default function Home() {
   // Load local state
   useEffect(() => {
     setIsMounted(true);
+    if (typeof navigator !== 'undefined') {
+      setIsMac(/Mac|iPod|iPhone|iPad/.test(navigator.userAgent));
+    }
     const savedFolders = localStorage.getItem('savetab_folders');
     const savedTabs = localStorage.getItem('savetab_tabs');
     
@@ -830,6 +899,19 @@ export default function Home() {
       localStorage.setItem('savetab_tabs', JSON.stringify(tabs));
     }
   }, [folders, tabs, isMounted]);
+
+  // Sync custom color picker values when Create Folder Modal is opened
+  useEffect(() => {
+    if (isAddFolderModalOpen) {
+      setHexInputText(newFolderColor);
+      setIsHexInvalid(false);
+      const hsl = hexToHsl(newFolderColor);
+      setPickerHue(hsl.h);
+      setPickerSat(hsl.s);
+      setPickerLight(Math.max(30, Math.min(85, hsl.l)));
+      setShowCustomColor(false); // Reset to preset mode initially for clean UX
+    }
+  }, [isAddFolderModalOpen]);
 
   // Check if inputted command text is a URL
   const isInputUrl = useMemo(() => {
@@ -904,18 +986,45 @@ export default function Home() {
     setSelectedIndex(-1);
   }, [filteredTabs]);
 
-  // Keyboard navigation logic
+  // Keyboard navigation and hotkey logic
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl + K or Cmd + K: Focus command input
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         inputRef.current?.focus();
         return;
       }
       
+      // /: Focus command input when not typing in any input field
       if (e.key === '/' && document.activeElement !== inputRef.current && document.activeElement !== dropdownInputRef.current) {
+        // Only focus if we're not inside standard modal input fields
+        const isEditingInput = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'SELECT';
+        if (!isEditingInput) {
+          e.preventDefault();
+          inputRef.current?.focus();
+          return;
+        }
+      }
+
+      // Alt + N / Option + N: Toggle / Open add folder modal
+      if (e.altKey && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        inputRef.current?.focus();
+        setIsAddFolderModalOpen(prev => !prev);
+        return;
+      }
+
+      // Ctrl + G / Cmd + G or Alt + G: Toggle Graph/List view in All Bookmarks
+      if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') || (e.altKey && e.key.toLowerCase() === 'g')) {
+        e.preventDefault();
+        setAllBookmarksMode(prev => prev === 'graph' ? 'list' : 'graph');
+        return;
+      }
+
+      // Ctrl + H / Cmd + H or Alt + H: Toggle Shortcuts Guide Dialog
+      if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') || (e.altKey && e.key.toLowerCase() === 'h')) {
+        e.preventDefault();
+        setIsHotkeysModalOpen(prev => !prev);
         return;
       }
 
@@ -923,20 +1032,32 @@ export default function Home() {
       const isDropdownFocused = document.activeElement === dropdownInputRef.current;
       
       if (e.key === 'ArrowDown') {
-        if (!isDropdownFocused) {
+        if (!isDropdownFocused && !isInputFocused) {
           e.preventDefault();
           setSelectedIndex(prev => (prev < filteredTabs.length - 1 ? prev + 1 : prev));
         }
       } else if (e.key === 'ArrowUp') {
-        if (!isDropdownFocused) {
+        if (!isDropdownFocused && !isInputFocused) {
           e.preventDefault();
           setSelectedIndex(prev => (prev > 0 ? prev - 1 : -1));
         }
       } else if (e.key === 'Escape') {
         e.preventDefault();
+        // Hierarchical Escape closing sequence
         if (activeLightboxImage) {
           setActiveLightboxImage(null);
+        } else if (deleteConfirmation) {
+          setDeleteConfirmation(null);
+        } else if (editingTab) {
+          setEditingTab(null);
+        } else if (editingFolder) {
+          setEditingFolder(null);
+        } else if (isAddFolderModalOpen) {
+          setIsAddFolderModalOpen(false);
+        } else if (isHotkeysModalOpen) {
+          setIsHotkeysModalOpen(false);
         } else {
+          // Clear and blur the search command inputs
           setCommandText('');
           inputRef.current?.blur();
           dropdownInputRef.current?.blur();
@@ -954,15 +1075,29 @@ export default function Home() {
         if (!isInputFocused && !isDropdownFocused && selectedIndex >= 0 && selectedIndex < filteredTabs.length) {
           e.preventDefault();
           const tabToDelete = filteredTabs[selectedIndex];
-          setTabs(prev => prev.filter(t => t.id !== tabToDelete.id));
-          setSelectedIndex(prev => (prev > 0 ? prev - 1 : -1));
+          // Open custom destructive confirmation modal instead of deleting instantly
+          setDeleteConfirmation({
+            type: 'tab',
+            id: tabToDelete.id,
+            name: tabToDelete.title
+          });
         }
       }
     };
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [filteredTabs, selectedIndex, isInputUrl, activeLightboxImage]);
+  }, [
+    filteredTabs, 
+    selectedIndex, 
+    isInputUrl, 
+    activeLightboxImage, 
+    deleteConfirmation, 
+    editingTab, 
+    editingFolder, 
+    isAddFolderModalOpen, 
+    isHotkeysModalOpen
+  ]);
 
   // Handle clipboard pastes for screenshots in add/edit links
   useEffect(() => {
@@ -1146,6 +1281,80 @@ export default function Home() {
     setEditingFolder(folder);
     setEditFolderName(folder.name);
     setEditFolderColor(folder.color);
+    setHexInputText(folder.color);
+    setIsHexInvalid(false);
+    
+    // Check if color is a preset color
+    const isPreset = PRESET_COLORS.includes(folder.color);
+    setShowCustomColor(!isPreset);
+    
+    const hsl = hexToHsl(folder.color);
+    setPickerHue(hsl.h);
+    setPickerSat(hsl.s);
+    setPickerLight(Math.max(30, Math.min(85, hsl.l)));
+  };
+
+  // Custom Color Picker slider handler (bounds lightness to 30%-85% for legibility)
+  const handleHslChange = (h: number, s: number, l: number, isNewFolder: boolean) => {
+    const boundedL = Math.max(30, Math.min(85, l));
+    setPickerHue(h);
+    setPickerSat(s);
+    setPickerLight(boundedL);
+    const hex = hslToHex(h, s, boundedL);
+    setHexInputText(hex);
+    setIsHexInvalid(false);
+    if (isNewFolder) {
+      setNewFolderColor(hex);
+    } else {
+      setEditFolderColor(hex);
+    }
+  };
+
+  // Custom Color Picker Hex Input validator and handler
+  const handleHexInputChange = (text: string, isNewFolder: boolean) => {
+    setHexInputText(text);
+    let cleanHex = text.replace(/^#/, '');
+    if (cleanHex.length === 3) {
+      cleanHex = cleanHex.split('').map(x => x + x).join('');
+    }
+    
+    if (/^[0-9a-fA-F]{6}$/.test(cleanHex)) {
+      const tempHsl = hexToHsl(`#${cleanHex}`);
+      const boundedL = Math.max(30, Math.min(85, tempHsl.l));
+      
+      setIsHexInvalid(false);
+      const finalHex = hslToHex(tempHsl.h, tempHsl.s, boundedL);
+      if (isNewFolder) {
+        setNewFolderColor(finalHex);
+      } else {
+        setEditFolderColor(finalHex);
+      }
+      setPickerHue(tempHsl.h);
+      setPickerSat(tempHsl.s);
+      setPickerLight(boundedL);
+      
+      // Auto-correct text field if lightness was bounded
+      if (boundedL !== tempHsl.l) {
+        setHexInputText(finalHex);
+      }
+    } else {
+      setIsHexInvalid(true);
+    }
+  };
+
+  // Custom Color Picker Preset chip handler
+  const handlePresetColorSelect = (color: string, isNewFolder: boolean) => {
+    if (isNewFolder) {
+      setNewFolderColor(color);
+    } else {
+      setEditFolderColor(color);
+    }
+    setHexInputText(color);
+    const hsl = hexToHsl(color);
+    setPickerHue(hsl.h);
+    setPickerSat(hsl.s);
+    setPickerLight(Math.max(30, Math.min(85, hsl.l)));
+    setIsHexInvalid(false);
   };
 
   // Save Folder Settings
@@ -1163,29 +1372,75 @@ export default function Home() {
 
   // Delete folder
   const handleDeleteFolder = (folderId: string) => {
-    if (confirm("Are you sure you want to delete this folder? All of its tabs will be deleted as well.")) {
-      setFolders(prev => prev.filter(f => f.id !== folderId));
-      setTabs(prev => prev.filter(tab => tab.folderId !== folderId));
-      if (activeFolder === folderId) setActiveFolder(null);
-      setEditingFolder(null);
+    const folder = folders.find(f => f.id === folderId);
+    if (folder) {
+      setDeleteConfirmation({
+        type: 'folder',
+        id: folderId,
+        name: folder.name
+      });
+      setEditingFolder(null); // Close Edit modal to keep workflows clean
     }
   };
 
-  // Tab drag & drop positioning handlers
+  // Folder drag & drop reordering handlers
+  const handleFolderDragStart = (e: React.DragEvent, folderId: string) => {
+    e.dataTransfer.setData('folder-id', folderId);
+    e.dataTransfer.effectAllowed = 'move';
+    setTimeout(() => {
+      setDraggedFolderId(folderId);
+    }, 0);
+  };
+
+  const handleFolderDragEnd = () => {
+    setDraggedFolderId(null);
+    setDragOverFolderIdForReorder(null);
+  };
+
+  const handleFolderDragOver = (e: React.DragEvent, targetFolderId: string) => {
+    e.preventDefault();
+    if (draggedFolderId && draggedFolderId !== targetFolderId) {
+      setDragOverFolderIdForReorder(targetFolderId);
+    }
+  };
+
+  const handleFolderDrop = (e: React.DragEvent, targetFolderId: string) => {
+    e.preventDefault();
+    const sourceFolderId = e.dataTransfer.getData('folder-id') || draggedFolderId;
+    if (sourceFolderId && sourceFolderId !== targetFolderId) {
+      const sourceIndex = folders.findIndex(f => f.id === sourceFolderId);
+      const targetIndex = folders.findIndex(f => f.id === targetFolderId);
+      if (sourceIndex !== -1 && targetIndex !== -1) {
+        const updatedFolders = [...folders];
+        const [draggedItem] = updatedFolders.splice(sourceIndex, 1);
+        updatedFolders.splice(targetIndex, 0, draggedItem);
+        setFolders(updatedFolders);
+      }
+    }
+    setDraggedFolderId(null);
+    setDragOverFolderIdForReorder(null);
+  };
+
+  // Tab drag & drop positioning / reordering handlers
   const handleDragStart = (e: React.DragEvent, id: string) => {
-    setDraggedTabId(id);
     e.dataTransfer.setData('text/plain', id);
+    e.dataTransfer.effectAllowed = 'move';
+    setTimeout(() => {
+      setDraggedTabId(id);
+    }, 0);
   };
 
   const handleDragEnd = () => {
     setDraggedTabId(null);
     setDragHoverFolderId(null);
+    setDragHoverTabId(null);
   };
 
   const handleDragOverFolder = (e: React.DragEvent, folderId: string) => {
     e.preventDefault();
     if (draggedTabId) {
       setDragHoverFolderId(folderId);
+      setDragHoverTabId(null);
     }
   };
 
@@ -1195,7 +1450,7 @@ export default function Home() {
 
   const handleDropOnFolder = (e: React.DragEvent, folderId: string) => {
     e.preventDefault();
-    const tabId = e.dataTransfer.getData('text/plain');
+    const tabId = e.dataTransfer.getData('text/plain') || draggedTabId;
     if (tabId) {
       setTabs(prev => prev.map(tab => 
         tab.id === tabId ? { ...tab, folderId } : tab
@@ -1205,17 +1460,71 @@ export default function Home() {
     setDragHoverFolderId(null);
   };
 
+  // Tab drag & drop reordering handlers (inline lists)
+  const handleTabDragOver = (e: React.DragEvent, targetTabId: string) => {
+    e.preventDefault();
+    if (draggedTabId && draggedTabId !== targetTabId) {
+      setDragHoverTabId(targetTabId);
+    }
+  };
+
+  const handleTabDragLeave = () => {
+    setDragHoverTabId(null);
+  };
+
+  const handleTabDrop = (e: React.DragEvent, targetTabId: string) => {
+    e.preventDefault();
+    const sourceTabId = e.dataTransfer.getData('text/plain') || draggedTabId;
+    if (sourceTabId && sourceTabId !== targetTabId) {
+      const sourceIndex = tabs.findIndex(t => t.id === sourceTabId);
+      const targetIndex = tabs.findIndex(t => t.id === targetTabId);
+      if (sourceIndex !== -1 && targetIndex !== -1) {
+        const updatedTabs = [...tabs];
+        const [draggedItem] = updatedTabs.splice(sourceIndex, 1);
+        updatedTabs.splice(targetIndex, 0, draggedItem);
+        setTabs(updatedTabs);
+      }
+    }
+    setDraggedTabId(null);
+    setDragHoverTabId(null);
+  };
+
   const handleDeleteTab = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
-    if (confirm("Delete this bookmark?")) {
-      setTabs(prev => prev.filter(tab => tab.id !== id));
+    const tab = tabs.find(t => t.id === id);
+    if (tab) {
+      setDeleteConfirmation({
+        type: 'tab',
+        id: id,
+        name: tab.title
+      });
     }
+  };
+
+  const confirmDelete = () => {
+    if (!deleteConfirmation) return;
+    const { type, id } = deleteConfirmation;
+    if (type === 'tab') {
+      setTabs(prev => prev.filter(t => t.id !== id));
+    } else if (type === 'folder') {
+      setFolders(prev => prev.filter(f => f.id !== id));
+      setTabs(prev => prev.filter(t => t.folderId !== id));
+      if (activeFolder === id) {
+        setActiveFolder(null);
+      }
+    }
+    setDeleteConfirmation(null);
   };
 
   const activeFolderName = activeFolder ? folders.find(f => f.id === activeFolder)?.name : 'All bookmarks';
 
   if (!isMounted) return null;
+
+  const draggedFolderIdx = draggedFolderId ? folders.findIndex(f => f.id === draggedFolderId) : -1;
+  const hoveredFolderIdx = dragOverFolderIdForReorder ? folders.findIndex(f => f.id === dragOverFolderIdForReorder) : -1;
+  const draggedIdx = draggedTabId ? filteredTabs.findIndex(t => t.id === draggedTabId) : -1;
+  const hoveredIdx = dragHoverTabId ? filteredTabs.findIndex(t => t.id === dragHoverTabId) : -1;
 
   return (
     <>
@@ -1224,7 +1533,7 @@ export default function Home() {
       <div className="bg-grid-overlay" />
 
       {/* Main Fullbleed UI Frame */}
-      <div className="app-frame">
+      <div className={`app-frame ${(draggedTabId || draggedFolderId) ? 'dragging-active' : ''}`}>
         
         {/* Floating sidebar navigator */}
         <aside className="sidebar">
@@ -1249,35 +1558,89 @@ export default function Home() {
           </nav>
 
           <div className="nav-label">Folders</div>
-          <nav className="nav-list" style={{ overflowY: 'auto', flex: 1 }}>
-            {folders.map(folder => {
+          <nav 
+            className="nav-list" 
+            style={{ overflowY: 'auto', flex: 1 }}
+            onDragOver={(e) => {
+              if (e.target === e.currentTarget) {
+                setDragOverFolderIdForReorder(null);
+                setDragHoverFolderId(null);
+              }
+            }}
+          >
+            {folders.map((folder, idx) => {
               const folderTabCount = tabs.filter(t => t.folderId === folder.id).length;
               const isTargetHover = dragHoverFolderId === folder.id;
+              const isDragging = draggedFolderId === folder.id;
               
+              let folderShiftStyle: React.CSSProperties = {};
+              let isFolderHoverTop = false;
+              let isFolderHoverBottom = false;
+
+              if (draggedFolderIdx !== -1 && hoveredFolderIdx !== -1 && draggedFolderIdx !== hoveredFolderIdx) {
+                if (draggedFolderIdx < hoveredFolderIdx) {
+                  if (idx > draggedFolderIdx && idx <= hoveredFolderIdx) {
+                    folderShiftStyle = { transform: 'translateY(calc(-100% - 3px))' };
+                  }
+                  if (idx === hoveredFolderIdx) {
+                    isFolderHoverBottom = true;
+                  }
+                } else {
+                  if (idx >= hoveredFolderIdx && idx < draggedFolderIdx) {
+                    folderShiftStyle = { transform: 'translateY(calc(100% + 3px))' };
+                  }
+                  if (idx === hoveredFolderIdx) {
+                    isFolderHoverTop = true;
+                  }
+                }
+              }
+
               return (
-                <div 
-                  key={folder.id} 
-                  className={`nav-item ${activeFolder === folder.id ? 'active' : ''} ${isTargetHover ? 'drag-hover' : ''}`}
-                  onClick={() => setActiveFolder(folder.id)}
-                  onDragOver={(e) => handleDragOverFolder(e, folder.id)}
-                  onDragLeave={handleDragLeaveFolder}
-                  onDrop={(e) => handleDropOnFolder(e, folder.id)}
-                  style={{ color: folder.color }}
+                <div
+                  key={folder.id}
+                  className="nav-item-wrapper"
+                  draggable
+                  onDragStart={(e) => handleFolderDragStart(e, folder.id)}
+                  onDragEnd={handleFolderDragEnd}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    if (draggedFolderId) {
+                      handleFolderDragOver(e, folder.id);
+                    } else if (draggedTabId) {
+                      handleDragOverFolder(e, folder.id);
+                    }
+                  }}
+                  onDragLeave={() => {
+                    handleDragLeaveFolder();
+                  }}
+                  onDrop={(e) => {
+                    if (draggedFolderId) {
+                      handleFolderDrop(e, folder.id);
+                    } else if (draggedTabId) {
+                      handleDropOnFolder(e, folder.id);
+                    }
+                  }}
                 >
-                  <div className="nav-item-inner">
-                    <Folder size={14} style={{ color: folder.color, fill: `${folder.color}25` }} />
-                    <span style={{ color: '#fff' }}>{folder.name}</span>
-                  </div>
-                  <div className="nav-item-inner">
-                    <span className="nav-count">{folderTabCount}</span>
-                    <div className="nav-item-actions" onClick={e => e.stopPropagation()}>
-                      <button 
-                        onClick={(e) => openEditFolderSettings(e, folder)}
-                        className="nav-edit-btn"
-                        title="Folder Settings"
-                      >
-                        <Settings size={12} />
-                      </button>
+                  <div 
+                    className={`nav-item ${activeFolder === folder.id ? 'active' : ''} ${isTargetHover ? 'drag-hover' : ''} ${isFolderHoverTop ? 'drag-over-reorder-top' : ''} ${isFolderHoverBottom ? 'drag-over-reorder-bottom' : ''} ${isDragging ? 'dragging' : ''}`}
+                    onClick={() => setActiveFolder(folder.id)}
+                    style={{ color: folder.color, ...folderShiftStyle }}
+                  >
+                    <div className="nav-item-inner">
+                      <Folder size={14} style={{ color: folder.color, fill: `${folder.color}25` }} />
+                      <span style={{ color: '#fff' }}>{folder.name}</span>
+                    </div>
+                    <div className="nav-item-inner">
+                      <span className="nav-count">{folderTabCount}</span>
+                      <div className="nav-item-actions" onClick={e => e.stopPropagation()}>
+                        <button 
+                          onClick={(e) => openEditFolderSettings(e, folder)}
+                          className="nav-edit-btn"
+                          title="Folder Settings"
+                        >
+                          <Settings size={12} />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1292,6 +1655,17 @@ export default function Home() {
             <FolderPlus size={14} />
             New folder
           </button>
+
+          <div className="sidebar-footer">
+            <button 
+              className="sidebar-footer-btn"
+              onClick={() => setIsHotkeysModalOpen(true)}
+              title="Keyboard Shortcuts Guide"
+            >
+              <HelpCircle size={14} />
+              <span>Shortcuts Guide</span>
+            </button>
+          </div>
         </aside>
 
         {/* Main Interface Workspace */}
@@ -1433,7 +1807,14 @@ export default function Home() {
           {activeFolder === null && allBookmarksMode === 'graph' && tabs.length > 0 ? (
             <RelationGraph folders={folders} tabs={tabs} onNodeOpen={handleNodeOpen} />
           ) : (
-            <div className="scrollable-content">
+            <div 
+              className="scrollable-content"
+              onDragOver={(e) => {
+                if (e.target === e.currentTarget) {
+                  setDragHoverTabId(null);
+                }
+              }}
+            >
               {filteredTabs.length === 0 ? (
                 <div className="empty-illustration">
                   <LinkIcon size={28} style={{ color: 'var(--text-muted)' }} />
@@ -1451,20 +1832,42 @@ export default function Home() {
                   const isSelected = selectedIndex === idx;
                   const tabFolder = folders.find(f => f.id === tab.folderId);
                   
+                  let shiftStyle: React.CSSProperties = {};
+                  let isHoverTop = false;
+                  let isHoverBottom = false;
+
+                  if (draggedIdx !== -1 && hoveredIdx !== -1 && draggedIdx !== hoveredIdx) {
+                    if (draggedIdx < hoveredIdx) {
+                      if (idx > draggedIdx && idx <= hoveredIdx) {
+                        shiftStyle = { transform: 'translateY(calc(-100% - 6px))' };
+                      }
+                      if (idx === hoveredIdx) {
+                        isHoverBottom = true;
+                      }
+                    } else {
+                      if (idx >= hoveredIdx && idx < draggedIdx) {
+                        shiftStyle = { transform: 'translateY(calc(100% + 6px))' };
+                      }
+                      if (idx === hoveredIdx) {
+                        isHoverTop = true;
+                      }
+                    }
+                  }
+
                   return (
                     <div 
                       key={tab.id}
-                      className={`tab-card ${isSelected ? 'selected' : ''} ${draggedTabId === tab.id ? 'dragging' : ''}`}
+                      className="tab-card-wrapper"
                       draggable
                       onDragStart={(e) => handleDragStart(e, tab.id)}
                       onDragEnd={handleDragEnd}
-                      onClick={() => window.open(tab.url, '_blank')}
-                      style={{ animationDelay: `${idx * 0.03}s` }}
+                      onDragOver={(e) => handleTabDragOver(e, tab.id)}
+                      onDrop={(e) => handleTabDrop(e, tab.id)}
                       onMouseEnter={(e) => {
                         if (tab.screenshot) {
-                          const cardEl = e.currentTarget;
-                          const thumbEl = cardEl.querySelector('.tab-thumbnail-indicator');
-                          const targetRect = thumbEl ? thumbEl.getBoundingClientRect() : cardEl.getBoundingClientRect();
+                          const wrapperEl = e.currentTarget;
+                          const thumbEl = wrapperEl.querySelector('.tab-thumbnail-indicator');
+                          const targetRect = thumbEl ? thumbEl.getBoundingClientRect() : wrapperEl.getBoundingClientRect();
                           setHoveredScreenshot({
                             image: tab.screenshot,
                             x: targetRect.left - 230,
@@ -1474,75 +1877,85 @@ export default function Home() {
                       }}
                       onMouseLeave={() => setHoveredScreenshot(null)}
                     >
-                      <div className="tab-left">
-                        <div className="favicon-container">
-                          <img 
-                            className="favicon-img"
-                            src={`https://www.google.com/s2/favicons?domain=${tab.url}&sz=32`} 
-                            alt="" 
-                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                          />
-                        </div>
-                        <div className="tab-details">
-                          <div className="tab-title-container">
-                            <span className="tab-title">{tab.title}</span>
-                          </div>
-
-                          <div className="tab-url-row">
-                            <span className="tab-url">{new URL(tab.url).hostname}</span>
-                            {activeFolder === null && tabFolder && (
-                              <span 
-                                className="folder-badge" 
-                                style={{ color: tabFolder.color, borderColor: `${tabFolder.color}25`, background: `${tabFolder.color}08` }}
-                              >
-                                {tabFolder.name}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="tab-right" onClick={e => e.stopPropagation()}>
-                        {/* Show small thumbnail image indicator if screenshot exists */}
-                        {tab.screenshot && (
-                          <div 
-                            style={{ position: 'relative', cursor: 'zoom-in' }}
-                            onClick={() => setActiveLightboxImage(tab.screenshot || null)}
-                          >
+                      <div 
+                        className={`tab-card ${isSelected ? 'selected' : ''} ${draggedTabId === tab.id ? 'dragging' : ''} ${isHoverTop ? 'drag-hover-top' : ''} ${isHoverBottom ? 'drag-hover-bottom' : ''}`}
+                        onClick={() => window.open(tab.url, '_blank')}
+                        style={{ 
+                          animationDelay: draggedTabId ? '0s' : `${idx * 0.03}s`,
+                          animationPlayState: draggedTabId ? 'paused' : 'running',
+                          ...shiftStyle 
+                        }}
+                      >
+                        <div className="tab-left">
+                          <div className="favicon-container">
                             <img 
-                              src={tab.screenshot} 
-                              alt="Thumbnail preview" 
-                              className="tab-thumbnail-indicator" 
+                              className="favicon-img"
+                              src={`https://www.google.com/s2/favicons?domain=${tab.url}&sz=32`} 
+                              alt="" 
+                              onError={(e) => { e.currentTarget.style.display = 'none'; }}
                             />
                           </div>
-                        )}
+                          <div className="tab-details">
+                            <div className="tab-title-container">
+                              <span className="tab-title">{tab.title}</span>
+                            </div>
 
-                        <span className="tab-meta">{formatTimeAgo(tab.createdAt)}</span>
+                            <div className="tab-url-row">
+                              <span className="tab-url">{new URL(tab.url).hostname}</span>
+                              {activeFolder === null && tabFolder && (
+                                <span 
+                                  className="folder-badge" 
+                                  style={{ color: tabFolder.color, borderColor: `${tabFolder.color}25`, background: `${tabFolder.color}08` }}
+                                >
+                                  {tabFolder.name}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                         
-                        <div className="actions-row">
-                          <button 
-                            onClick={() => openEditTabModal(tab)}
-                            className="action-btn"
-                            title="Edit Link Details"
-                          >
-                            <Edit2 size={13} />
-                          </button>
-                          <button 
-                            onClick={(e) => handleDeleteTab(e, tab.id)}
-                            className="action-btn danger"
-                            title="Delete link"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                          <a 
-                            href={tab.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="action-btn"
-                            title="Visit link"
-                          >
-                            <ExternalLink size={13} />
-                          </a>
+                        <div className="tab-right" onClick={e => e.stopPropagation()}>
+                          {/* Show small thumbnail image indicator if screenshot exists */}
+                          {tab.screenshot && (
+                            <div 
+                              style={{ position: 'relative', cursor: 'zoom-in' }}
+                              onClick={() => setActiveLightboxImage(tab.screenshot || null)}
+                            >
+                              <img 
+                                src={tab.screenshot} 
+                                alt="Thumbnail preview" 
+                                className="tab-thumbnail-indicator" 
+                              />
+                            </div>
+                          )}
+
+                          <span className="tab-meta">{formatTimeAgo(tab.createdAt)}</span>
+                          
+                          <div className="actions-row">
+                            <button 
+                              onClick={() => openEditTabModal(tab)}
+                              className="action-btn"
+                              title="Edit Link Details"
+                            >
+                              <Edit2 size={13} />
+                            </button>
+                            <button 
+                              onClick={(e) => handleDeleteTab(e, tab.id)}
+                              className="action-btn danger"
+                              title="Delete link"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                            <a 
+                              href={tab.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="action-btn"
+                              title="Visit link"
+                            >
+                              <ExternalLink size={13} />
+                            </a>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1581,27 +1994,101 @@ export default function Home() {
                 <div className="color-presets-label">
                   <label className="form-label">Select Color</label>
                 </div>
-                <div className="color-presets">
-                  {PRESET_COLORS.map(color => (
-                    <div 
-                      key={color}
-                      className={`color-chip ${newFolderColor === color ? 'active' : ''}`}
-                      style={{ backgroundColor: color, color: color }}
-                      onClick={() => setNewFolderColor(color)}
-                    />
-                  ))}
-                </div>
 
-                <label className="custom-color-trigger">
-                  <div className="custom-color-indicator" style={{ backgroundColor: newFolderColor }} />
-                  <span className="form-label" style={{ margin: 0, textTransform: 'none', cursor: 'pointer' }}>Custom Hex Color...</span>
-                  <input 
-                    type="color" 
-                    className="custom-color-picker" 
-                    value={newFolderColor}
-                    onChange={e => setNewFolderColor(e.target.value)}
-                  />
-                </label>
+                {showCustomColor ? (
+                  <div className="custom-color-picker-panel">
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>HUE (H)</span>
+                        <span>{pickerHue}°</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="360" 
+                        className="picker-range range-hue" 
+                        value={pickerHue}
+                        onChange={e => handleHslChange(Number(e.target.value), pickerSat, pickerLight, true)}
+                      />
+                    </div>
+
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>SATURATION (S)</span>
+                        <span>{pickerSat}%</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        className="picker-range" 
+                        style={{
+                          background: `linear-gradient(to right, hsl(${pickerHue}, 0%, ${pickerLight}%), hsl(${pickerHue}, 100%, ${pickerLight}%))`
+                        }}
+                        value={pickerSat}
+                        onChange={e => handleHslChange(pickerHue, Number(e.target.value), pickerLight, true)}
+                      />
+                    </div>
+
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>LIGHTNESS (L) - Legible range (30%-85%)</span>
+                        <span>{pickerLight}%</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="30" 
+                        max="85" 
+                        className="picker-range" 
+                        style={{
+                          background: `linear-gradient(to right, hsl(${pickerHue}, ${pickerSat}%, 30%), hsl(${pickerHue}, ${pickerSat}%, 85%))`
+                        }}
+                        value={pickerLight}
+                        onChange={e => handleHslChange(pickerHue, pickerSat, Number(e.target.value), true)}
+                      />
+                    </div>
+
+                    <div className="picker-hex-row">
+                      <div className="picker-hex-input-wrapper">
+                        <span className="picker-hex-hash">#</span>
+                        <input 
+                          type="text" 
+                          className={`picker-hex-input ${isHexInvalid ? 'invalid' : ''}`}
+                          placeholder="ff79c6"
+                          value={hexInputText.replace(/^#/, '')}
+                          onChange={e => handleHexInputChange(e.target.value, true)}
+                        />
+                      </div>
+                      <div 
+                        className="picker-preview-dot" 
+                        style={{ 
+                          backgroundColor: newFolderColor,
+                          boxShadow: `0 0 12px ${newFolderColor}`
+                        }} 
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="color-presets">
+                    {PRESET_COLORS.map(color => (
+                      <div 
+                        key={color}
+                        className={`color-chip ${newFolderColor === color ? 'active' : ''}`}
+                        style={{ backgroundColor: color, color: color }}
+                        onClick={() => handlePresetColorSelect(color, true)}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <button 
+                  type="button" 
+                  className="custom-color-toggle-btn"
+                  onClick={() => setShowCustomColor(prev => !prev)}
+                >
+                  <Sparkles size={12} style={{ color: 'var(--accent-blue)' }} />
+                  {showCustomColor ? "Use preset colors" : "Custom color picker..."}
+                </button>
               </div>
 
               <div className="dialog-buttons">
@@ -1639,27 +2126,101 @@ export default function Home() {
                 <div className="color-presets-label">
                   <label className="form-label">Select Color</label>
                 </div>
-                <div className="color-presets">
-                  {PRESET_COLORS.map(color => (
-                    <div 
-                      key={color}
-                      className={`color-chip ${editFolderColor === color ? 'active' : ''}`}
-                      style={{ backgroundColor: color, color: color }}
-                      onClick={() => setEditFolderColor(color)}
-                    />
-                  ))}
-                </div>
 
-                <label className="custom-color-trigger">
-                  <div className="custom-color-indicator" style={{ backgroundColor: editFolderColor }} />
-                  <span className="form-label" style={{ margin: 0, textTransform: 'none', cursor: 'pointer' }}>Custom Hex Color...</span>
-                  <input 
-                    type="color" 
-                    className="custom-color-picker" 
-                    value={editFolderColor}
-                    onChange={e => setEditFolderColor(e.target.value)}
-                  />
-                </label>
+                {showCustomColor ? (
+                  <div className="custom-color-picker-panel">
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>HUE (H)</span>
+                        <span>{pickerHue}°</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="360" 
+                        className="picker-range range-hue" 
+                        value={pickerHue}
+                        onChange={e => handleHslChange(Number(e.target.value), pickerSat, pickerLight, false)}
+                      />
+                    </div>
+
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>SATURATION (S)</span>
+                        <span>{pickerSat}%</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="100" 
+                        className="picker-range" 
+                        style={{
+                          background: `linear-gradient(to right, hsl(${pickerHue}, 0%, ${pickerLight}%), hsl(${pickerHue}, 100%, ${pickerLight}%))`
+                        }}
+                        value={pickerSat}
+                        onChange={e => handleHslChange(pickerHue, Number(e.target.value), pickerLight, false)}
+                      />
+                    </div>
+
+                    <div className="picker-slider-group">
+                      <div className="picker-slider-header">
+                        <span>LIGHTNESS (L) - Legible range (30%-85%)</span>
+                        <span>{pickerLight}%</span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="30" 
+                        max="85" 
+                        className="picker-range" 
+                        style={{
+                          background: `linear-gradient(to right, hsl(${pickerHue}, ${pickerSat}%, 30%), hsl(${pickerHue}, ${pickerSat}%, 85%))`
+                        }}
+                        value={pickerLight}
+                        onChange={e => handleHslChange(pickerHue, pickerSat, Number(e.target.value), false)}
+                      />
+                    </div>
+
+                    <div className="picker-hex-row">
+                      <div className="picker-hex-input-wrapper">
+                        <span className="picker-hex-hash">#</span>
+                        <input 
+                          type="text" 
+                          className={`picker-hex-input ${isHexInvalid ? 'invalid' : ''}`}
+                          placeholder="ff79c6"
+                          value={hexInputText.replace(/^#/, '')}
+                          onChange={e => handleHexInputChange(e.target.value, false)}
+                        />
+                      </div>
+                      <div 
+                        className="picker-preview-dot" 
+                        style={{ 
+                          backgroundColor: editFolderColor,
+                          boxShadow: `0 0 12px ${editFolderColor}`
+                        }} 
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="color-presets">
+                    {PRESET_COLORS.map(color => (
+                      <div 
+                        key={color}
+                        className={`color-chip ${editFolderColor === color ? 'active' : ''}`}
+                        style={{ backgroundColor: color, color: color }}
+                        onClick={() => handlePresetColorSelect(color, false)}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <button 
+                  type="button" 
+                  className="custom-color-toggle-btn"
+                  onClick={() => setShowCustomColor(prev => !prev)}
+                >
+                  <Sparkles size={12} style={{ color: 'var(--accent-blue)' }} />
+                  {showCustomColor ? "Use preset colors" : "Custom color picker..."}
+                </button>
               </div>
 
               <div className="dialog-buttons" style={{ justifyContent: 'space-between' }}>
@@ -1779,6 +2340,134 @@ export default function Home() {
               <X size={16} /> Close
             </button>
             <img src={activeLightboxImage} alt="Fullscreen preview" className="lightbox-img" />
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Keyboard Shortcuts Guide */}
+      {isHotkeysModalOpen && (
+        <div className="premium-overlay" onClick={() => setIsHotkeysModalOpen(false)}>
+          <div className="premium-dialog" style={{ maxWidth: '420px' }} onClick={e => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2 className="viewport-title" style={{ fontSize: '1.25rem' }}>Keyboard Shortcuts</h2>
+              <p className="dialog-desc">Boost your productivity with global hotkeys.</p>
+            </div>
+
+            <div className="shortcuts-grid">
+              <div className="shortcut-row">
+                <span>Focus search / Command bar</span>
+                <div className="shortcut-keys">
+                  <kbd>{isMac ? '⌘' : 'Ctrl'}</kbd>
+                  <kbd>K</kbd>
+                  <span>or</span>
+                  <kbd>/</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Create new folder workspace</span>
+                <div className="shortcut-keys">
+                  <kbd>{isMac ? '⌥' : 'Alt'}</kbd>
+                  <kbd>N</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Toggle Graph / List view</span>
+                <div className="shortcut-keys">
+                  <kbd>{isMac ? '⌘' : 'Ctrl'}</kbd>
+                  <kbd>G</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Open Shortcuts Guide</span>
+                <div className="shortcut-keys">
+                  <kbd>{isMac ? '⌘' : 'Ctrl'}</kbd>
+                  <kbd>H</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Navigate links selection</span>
+                <div className="shortcut-keys">
+                  <kbd>↑</kbd>
+                  <kbd>↓</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Open selected bookmark</span>
+                <div className="shortcut-keys">
+                  <kbd>Enter</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Delete selected bookmark</span>
+                <div className="shortcut-keys">
+                  <kbd>{isMac ? '⌫' : 'Backspace'}</kbd>
+                  <span>or</span>
+                  <kbd>Delete</kbd>
+                </div>
+              </div>
+
+              <div className="shortcut-row">
+                <span>Close active overlay / Clear Search</span>
+                <div className="shortcut-keys">
+                  <kbd>Esc</kbd>
+                </div>
+              </div>
+            </div>
+
+            <div className="dialog-buttons" style={{ marginTop: '24px' }}>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                style={{ width: '100%' }} 
+                onClick={() => setIsHotkeysModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Destructive Deletion Confirmation */}
+      {deleteConfirmation && (
+        <div className="premium-overlay destructive" onClick={() => setDeleteConfirmation(null)}>
+          <div className="premium-dialog destructive-dialog" onClick={e => e.stopPropagation()}>
+            <div className="dialog-header" style={{ alignItems: 'center', textAlign: 'center' }}>
+              <div className="dialog-warning-icon">
+                <AlertCircle size={24} style={{ color: 'var(--accent-red)' }} />
+              </div>
+              <h2 className="viewport-title" style={{ fontSize: '1.25rem' }}>
+                Delete {deleteConfirmation.type === 'folder' ? 'Folder' : 'Bookmark'}?
+              </h2>
+              <p className="dialog-desc" style={{ marginTop: '8px' }}>
+                {deleteConfirmation.type === 'folder' 
+                  ? `Are you sure you want to delete the folder "${deleteConfirmation.name}"? This will permanently delete the folder and all bookmarks saved inside it.`
+                  : `Are you sure you want to delete the bookmark "${deleteConfirmation.name}"? This action cannot be undone.`}
+              </p>
+            </div>
+
+            <div className="dialog-buttons" style={{ justifyContent: 'center', gap: '16px', marginTop: '24px' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => setDeleteConfirmation(null)}
+              >
+                Cancel
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary btn-destructive" 
+                onClick={confirmDelete}
+              >
+                Delete
+              </button>
+            </div>
           </div>
         </div>
       )}
