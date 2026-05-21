@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   Folder, Plus, ExternalLink, Trash2, Edit2, Check, X,
   Search, Link as LinkIcon, Compass, FolderPlus,
@@ -67,8 +67,8 @@ function formatTimeAgo(timestamp: number): string {
   return `${days}d ago`;
 }
 
-// Regex to check if text is a URL
-const URL_REGEX = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w .-]*)*\/?$/i;
+// Regex to check if text is a URL (safe from catastrophic backtracking / ReDoS)
+const URL_REGEX = /^(https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/[^\s]*)?$/i;
 
 // Client side image compressor
 function compressImage(file: File): Promise<string> {
@@ -768,6 +768,11 @@ export default function Home() {
   // Layout mode for All Bookmarks ('list' or 'graph')
   const [allBookmarksMode, setAllBookmarksMode] = useState<'graph' | 'list'>('graph');
 
+  // Stable node click open handler to avoid resetting canvas physics on every parent render
+  const handleNodeOpen = useCallback((url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }, []);
+
   // Input bindings
   const [commandText, setCommandText] = useState('');
   const [customTitle, setCustomTitle] = useState('');
@@ -1426,7 +1431,7 @@ export default function Home() {
 
           {/* Workspace Graph vs list representation */}
           {activeFolder === null && allBookmarksMode === 'graph' && tabs.length > 0 ? (
-            <RelationGraph folders={folders} tabs={tabs} onNodeOpen={(url) => window.open(url, '_blank')} />
+            <RelationGraph folders={folders} tabs={tabs} onNodeOpen={handleNodeOpen} />
           ) : (
             <div className="scrollable-content">
               {filteredTabs.length === 0 ? (
